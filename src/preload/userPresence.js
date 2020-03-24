@@ -1,23 +1,6 @@
-import { ipcRenderer } from 'electron';
+import { remote, app } from 'electron';
+
 import { getMeteor, getTracker, getGetUserPreference, getUserPresence } from './rocketChat';
-
-const pollUserPresence = (UserPresence, maximumIdleTime) => () => {
-	let isUserPresent = true;
-
-	try {
-		const idleTime = ipcRenderer.sendSync('request-system-idle-time');
-		isUserPresent = idleTime < maximumIdleTime;
-
-		if (isUserPresent) {
-			UserPresence.setOnline();
-
-		} else {
-			UserPresence.setAway();
-		}
-	} catch (error) {
-		console.error(error);
-	}
-};
 
 const handleUserPresence = () => {
 	const Meteor = getMeteor();
@@ -25,44 +8,51 @@ const handleUserPresence = () => {
 	const getUserPreference = getGetUserPreference();
 	const UserPresence = getUserPresence();
 
-	if (!Meteor || !Tracker || !getUserPreference || !UserPresence) {
-		return;
-	}
-
-	let intervalID;
-
+	let isAutoAwayEnabled;
+	let idleThreshold;
 	Tracker.autorun(() => {
-		if (intervalID) {
-			clearInterval(intervalID);
-			intervalID = null;
-		}
-
 		const uid = Meteor.userId();
+		isAutoAwayEnabled = getUserPreference(uid, 'enableAutoAway');
+		idleThreshold = getUserPreference(uid, 'idleTimeLimit');
 
-		if (!uid) {
-			return;
+		if (isAutoAwayEnabled) {
+			delete UserPresence.awayTime;
+			UserPresence.start();
 		}
-
-		delete UserPresence.awayTime;
-		UserPresence.awayOnWindowBlur = false;
-		UserPresence.start();
-
-		const isAutoAwayEnabled = getUserPreference(uid, 'enableAutoAway');
-
-		if (!isAutoAwayEnabled) {
-			UserPresence.setOnline();
-			return;
-		}
-
-		const maximumIdleTime = (getUserPreference(uid, 'idleTimeLimit') || 300) * 1000;
-		const idleTimeDetectionInterval = 5000;
-		const callback = pollUserPresence(UserPresence, maximumIdleTime);
-
-		intervalID = setInterval(callback, idleTimeDetectionInterval);
 	});
+
+	let prevState;
+	setInterval(() => {
+		const state = remote.powerMonitor.getSystemIdleState(idleThreshold);
+
+		if (prevState === state) {
+			return;
+		}
+
+		const isOnline = !isAutoAwayEnabled || state === 'active' || state === 'unknown';
+
+		if (isOnline) {
+			Meteor.call('UserPresence:online');
+		} else {
+			Meteor.call('UserPresence:away');
+		}
+
+		prevState = state;
+	}, 1000);
 };
 
-
+// if the system is put to sleep or screen is locked(windows OS), set userPresence to away
+const handleSystemActions = () => {
+	const Meteor = getMeteor();
+	remote.powerMonitor.on('suspend', () => {
+		Meteor.call('UserPresence:away');
+	});
+	// windows OS only
+	remote.powerMonitor.on('lock-screen', () => {
+		Meteor.call('UserPresence:away');
+	});
+};
 export default () => {
 	window.addEventListener('load', handleUserPresence);
+	window.addEventListener('load', handleSystemActions);
 };

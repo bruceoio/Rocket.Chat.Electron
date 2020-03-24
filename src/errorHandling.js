@@ -1,5 +1,6 @@
-import bugsnag from '@bugsnag/js';
+import bugsnag from '@bugsnag/node';
 import { app as mainApp, remote } from 'electron';
+
 const app = mainApp || remote.app;
 
 const logger = !remote ? console : new Proxy(console, {
@@ -46,8 +47,8 @@ export const setupErrorHandling = (appType) => {
 		return;
 	}
 
-	process.on('uncaughtException', handleError);
-	process.on('unhandledRejection', handleError);
+	process.addListener('uncaughtException', handleError);
+	process.addListener('unhandledRejection', handleError);
 };
 
 export const reportError = (error) => {

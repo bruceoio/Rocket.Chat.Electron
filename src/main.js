@@ -1,33 +1,52 @@
-import { app } from 'electron';
-import { setupErrorHandling } from './errorHandling';
-import appData from './main/appData';
-import './main/basicAuth';
-import { processDeepLink } from './main/deepLinks';
-import './main/systemIdleTime';
-import './main/updates';
-import { getMainWindow } from './main/mainWindow';
-import './main/dialogs/about';
-import './main/dialogs/screenshare';
-import './main/dialogs/update';
-import i18n from './i18n';
-export { default as dock } from './main/dock';
-export { default as menus } from './main/menus';
-export { default as tray } from './main/tray';
-export { default as notifications } from './main/notifications';
-export { default as certificate } from './main/certificateStore';
+import path from 'path';
 
-async function prepareApp() {
+import { app, BrowserWindow } from 'electron';
+import setupElectronReload from 'electron-reload';
+import rimraf from 'rimraf';
+
+import { setupErrorHandling } from './errorHandling';
+
+if (process.env.NODE_ENV === 'development') {
+	setupElectronReload(__dirname, {
+		electron: process.execPath,
+	});
+}
+
+const preventEvent = (event) => event.preventDefault();
+
+const prepareApp = () => {
 	setupErrorHandling('main');
 
 	app.setAsDefaultProtocolClient('rocketchat');
 	app.setAppUserModelId('chat.rocket');
 
-	await appData.initialize();
+	const dirName = process.env.NODE_ENV === 'production' ? app.name : `${ app.name } (${ process.env.NODE_ENV })`;
+
+	app.setPath('userData', path.join(app.getPath('appData'), dirName));
+
+	const [command, args] = [
+		process.argv.slice(0, app.isPackaged ? 1 : 2),
+		process.argv.slice(app.isPackaged ? 1 : 2),
+	];
+
+	if (args.includes('--disable-gpu')) {
+		app.commandLine.appendSwitch('--disable-2d-canvas-image-chromium');
+		app.commandLine.appendSwitch('--disable-accelerated-2d-canvas');
+		app.commandLine.appendSwitch('--disable-gpu');
+	}
+
+	if (args.includes('--reset-app-data')) {
+		const dataDir = app.getPath('userData');
+		rimraf.sync(dataDir);
+		app.relaunch({ args: [...command.slice(1)] });
+		app.exit();
+		return;
+	}
 
 	const canStart = process.mas || app.requestSingleInstanceLock();
 
 	if (!canStart) {
-		app.quit();
+		app.exit();
 		return;
 	}
 
@@ -38,25 +57,43 @@ async function prepareApp() {
 		app.disableHardwareAcceleration();
 	}
 
-	app.on('window-all-closed', () => {
+	app.addListener('certificate-error', preventEvent);
+	app.addListener('select-client-certificate', preventEvent);
+	app.addListener('login', preventEvent);
+	app.addListener('open-url', preventEvent);
+	app.addListener('window-all-closed', () => {
 		app.quit();
 	});
+};
 
-	app.on('open-url', (event, url) => {
-		event.preventDefault();
-		processDeepLink(url);
+const createMainWindow = () => {
+	const mainWindow = new BrowserWindow({
+		width: 1000,
+		height: 600,
+		minWidth: 600,
+		minHeight: 400,
+		titleBarStyle: 'hidden',
+		backgroundColor: '#2f343d',
+		show: false,
+		webPreferences: {
+			webviewTag: true,
+			nodeIntegration: true,
+		},
 	});
 
-	app.on('second-instance', (event, argv) => {
-		argv.slice(2).forEach(processDeepLink);
-	});
-}
+	mainWindow.addListener('close', preventEvent);
 
-(async () => {
-	await prepareApp();
+	mainWindow.webContents.addListener('will-attach-webview', (event, webPreferences) => {
+		delete webPreferences.enableBlinkFeatures;
+	});
+
+	mainWindow.loadFile(`${ app.getAppPath() }/app/public/app.html`);
+};
+
+const initialize = async () => {
+	prepareApp();
 	await app.whenReady();
-	await i18n.initialize();
-	app.emit('start');
-	await getMainWindow();
-	process.argv.slice(2).forEach(processDeepLink);
-})();
+	createMainWindow();
+};
+
+initialize();

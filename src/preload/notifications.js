@@ -1,12 +1,46 @@
-import { ipcRenderer, remote } from 'electron';
 import { EventEmitter } from 'events';
-import mem from 'mem';
-const { notifications } = remote.require('./main');
+
+import { ipcRenderer, remote } from 'electron';
+
+const fetchWithoutOrigin = remote.require('electron-fetch').default;
+
+const avatarCache = {};
+
+const inferContentTypeFromImageData = (data) => {
+	const header = data.slice(0, 3).map((byte) => byte.toString(16)).join('');
+	switch (header) {
+		case '89504e':
+			return 'image/png';
+		case '474946':
+			return 'image/gif';
+		case 'ffd8ff':
+			return 'image/jpeg';
+	}
+};
+
+const getAvatarUrlAsDataUrl = async (avatarUrl) => {
+	if (/^data:/.test(avatarUrl)) {
+		return avatarUrl;
+	}
+
+	if (avatarCache[avatarUrl]) {
+		return avatarCache[avatarUrl];
+	}
+
+	const response = await fetchWithoutOrigin(avatarUrl);
+	const arrayBuffer = await response.arrayBuffer();
+	const byteArray = Array.from(new Uint8Array(arrayBuffer));
+	const binaryString = byteArray.reduce((binaryString, byte) => binaryString + String.fromCharCode(byte), '');
+	const base64String = btoa(binaryString);
+	const contentType = response.headers.get('content-type');
+	avatarCache[avatarUrl] = `data:${ inferContentTypeFromImageData(byteArray) || contentType };base64,${ base64String }`;
+	return avatarCache[avatarUrl];
+};
 
 
 class Notification extends EventEmitter {
 	static requestPermission() {
-		return;
+
 	}
 
 	static get permission() {
@@ -15,41 +49,27 @@ class Notification extends EventEmitter {
 
 	constructor(title, options) {
 		super();
-		this.createIcon = mem(this.createIcon.bind(this));
 		this.create({ title, ...options });
-		this.addEventListener = this.addListener.bind(this);
 	}
 
-	async createIcon(icon) {
-		const img = new Image();
-		img.src = icon;
-		await new Promise((resolve, reject) => {
-			img.onload = resolve;
-			img.onerror = reject;
-		});
-
-		const canvas = document.createElement('canvas');
-		canvas.width = img.naturalWidth;
-		canvas.height = img.naturalHeight;
-
-		const context = canvas.getContext('2d');
-		context.drawImage(img, 0, 0);
-
-		return canvas.toDataURL();
-	}
+	addEventListener = ::this.addListener
 
 	async create({ icon, canReply, ...options }) {
 		if (icon) {
-			icon = await this.createIcon(icon);
+			icon = await getAvatarUrlAsDataUrl(icon);
 		}
 
-		const notification = notifications.create({ icon, hasReply: canReply, ...options });
+		const notification = new remote.Notification({
+			icon: icon && remote.nativeImage.createFromDataURL(icon),
+			hasReply: canReply,
+			...options,
+		});
 
-		notification.on('show', this.handleShow.bind(this));
-		notification.on('close', this.handleClose.bind(this));
-		notification.on('click', this.handleClick.bind(this));
-		notification.on('reply', this.handleReply.bind(this));
-		notification.on('action', this.handleAction.bind(this));
+		notification.addListener('show', this.handleShow.bind(this));
+		notification.addListener('close', this.handleClose.bind(this));
+		notification.addListener('click', this.handleClick.bind(this));
+		notification.addListener('reply', this.handleReply.bind(this));
+		notification.addListener('action', this.handleAction.bind(this));
 
 		notification.show();
 
@@ -69,7 +89,6 @@ class Notification extends EventEmitter {
 	}
 
 	handleClick(event) {
-		ipcRenderer.send('focus');
 		ipcRenderer.sendToHost('focus');
 		event.currentTarget = this;
 		this.onclick && this.onclick.call(this, event);
